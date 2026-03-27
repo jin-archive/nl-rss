@@ -9,8 +9,15 @@ import re
 url = "https://www.nl.go.kr/NL/contents/N50602000000.do"
 base_url = "https://www.nl.go.kr"
 
-# 1. 웹페이지 가져오기
-response = requests.get(url)
+# 1. 웹페이지 가져오기 (일반 브라우저인 것처럼 헤더 추가)
+headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
+}
+
+# 서버 응답 지연에 대비해 timeout 설정
+response = requests.get(url, headers=headers, timeout=15)
 response.raise_for_status()
 soup = BeautifulSoup(response.text, 'html.parser')
 
@@ -24,12 +31,9 @@ fg.description('국립중앙도서관 인재채용 게시판의 최신 공고를
 fg.language('ko')
 
 # 3. 게시판 목록 파싱
-# 웹사이트의 구조에 따라 CSS 선택자를 조정해야 할 수 있습니다. 
-# 일반적인 테이블 형태의 게시판 구조를 기준으로 작성되었습니다.
 board_items = soup.select('table tbody tr')
 
 if not board_items:
-    # Div 기반 리스트일 경우 대비
     board_items = soup.select('.board_list .item, .list_wrap > div')
 
 for item in board_items:

@@ -1,5 +1,6 @@
 import time
 import re
+import hashlib
 from bs4 import BeautifulSoup
 from feedgen.feed import FeedGenerator
 from datetime import datetime
@@ -12,7 +13,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 url = "https://www.nl.go.kr/NL/contents/N50602000000.do"
 base_url = "https://www.nl.go.kr"
 
-# 1. 셀레니움 헤드리스 브라우저 설정
+# 1. 크롬 브라우저 설정 및 접속
 print("크롬 브라우저를 시작합니다...")
 chrome_options = Options()
 chrome_options.add_argument('--headless')
@@ -40,57 +41,75 @@ fg.link(href=url, rel='alternate')
 fg.description('국립중앙도서관 인재채용 게시판의 최신 공고를 제공합니다.')
 fg.language('ko')
 
-# 3. 게시글 목록 파싱 (테이블 행 또는 리스트 아이템 찾기)
-# 보통 <div class="board_list"> 안의 <ul><li> 이거나 <table><tbody><tr> 입니다.
-list_items = soup.select('.board_list tbody tr')
-if not list_items:
-    list_items = soup.select('.board_list ul li') # 다른 구조일 경우 대비
-if not list_items:
-    list_items = soup.select('div[class*="list"] > div') # 최후의 수단 (클래스에 list가 포함된 div의 자식 div들)
-
+# 3. 데이터 파싱 및 정제
+links = soup.find_all('a')
+added_links = set()
 items_found = 0
 
-for item in list_items:
-    # 각 항목에서 가장 주요한 링크(제목 링크) 찾기
-    link_element = item.find('a')
-    if not link_element:
+for a in links:
+    # a 태그 안의 모든 텍스트를 공백으로 띄워 가져옵니다.
+    raw_title = a.get_text(separator=' ', strip=True)
+    
+    # 채용 관련 키워드가 없으면 메뉴 링크이므로 패스
+    if not any(k in raw_title for k in ['채용', '공고', '합격', '서류전형', '면접', '근로자']):
         continue
 
-    # 제목 정제: <a> 태그 안의 텍스트만 추출 (공지, 새글 등의 뱃지 텍스트 제거)
-    title = link_element.get_text(strip=True)
-    
-    # 만약 '공지' 나 다른 텍스트가 같이 섞여 나오는 경우를 대비한 정제
-    # (이미지 상에서 <a> 태그 안에 불필요한 텍스트가 있다면 구조 확인이 더 필요할 수 있습니다)
-    
-    link = link_element.get('href')
-    onclick = link_element.get('onclick') or ''
-
-    # 링크 주소 정리
-    if not link or link == '#' or 'javascript' in link:
-        # onclick 속성에서 fnDetail('1234') 같은 형태를 찾음
-        nums = re.findall(r"\d+", onclick)
-        link = f"{url}#{nums[0]}" if nums else f"{url}#{hash(title)}"
-    elif link.startswith('/'):
-        link = base_url + link
-
-    # 날짜 추출: 2026-03-27 과 같은 형식 찾기
+    # 날짜 추출 (2026-03-27 형식)
     date_str = ""
-    # 전체 텍스트에서 날짜 형식을 검색
-    date_match = re.search(r'20\d{2}[-./]\d{2}[-./]\d{2}', item.get_text())
+    date_match = re.search(r'(20\d{2})[-./](\d{2})[-./](\d{2})', raw_title)
     if date_match:
-        date_str = date_match.group().replace('.', '-').replace('/', '-')
+        date_str = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
 
-    # 유효한 제목인지 확인 (빈 제목 방지)
-    if len(title) < 5: 
+    # -----------------------------------
+    # 제목 정제 (핵심 로직)
+    # -----------------------------------
+    title = raw_title
+    
+    # 1. 앞부분의 '공지'나 '새글' 글자 제거
+    title = re.sub(r'^(공지|새글)\s*', '', title)
+    
+    # 2. 날짜와 그 뒤에 붙어있는 글자(조회수 등)를 통째로 잘라냄
+    title = re.sub(r'\s*20\d{2}[-./]\d{2}[-./]\d{2}.*$', '', title).strip()
+    
+    # 3. 끝부분에 부서명(예: 온라인자료과, 자료보존연구센터)이 중복 표기된 경우 제거
+    title = re.sub(r'\s+[가-힣]+과$', '', title).strip()
+    title = re.sub(r'\s+[가-힣]+센터$', '', title).strip()
+
+    if len(title) < 5:
         continue
 
-    # RSS 엔트리 추가
+    # -----------------------------------
+    # 링크 식별자 고유화 로직 ('#none' 중복 방지)
+    # -----------------------------------
+    href = a.get('href', '').strip()
+    onclick = a.get('onclick', '') or ''
+
+    real_link = ""
+    if not href or href in ['#', '#none'] or href.startswith('javascript'):
+        # onclick 속성에서 fnDetail('12345') 같은 번호를 찾아 고유 링크 생성
+        nums = re.findall(r"\d{4,}", onclick) 
+        if nums:
+            real_link = f"{url}?seq={nums[0]}"
+        else:
+            # 번호마저 없다면 제목을 해시(Hash) 처리하여 겹치지 않는 가상 주소 부여
+            real_link = f"{url}#{hashlib.md5(title.encode()).hexdigest()[:8]}"
+    else:
+        if href.startswith('/'):
+            real_link = base_url + href
+        else:
+            real_link = href
+
+    # 고유 링크를 기준으로 중복 방지
+    if real_link in added_links:
+        continue
+    added_links.add(real_link)
+
+    # 4. RSS 항목 추가
     fe = fg.add_entry()
-    fe.id(link)
+    fe.id(real_link)
     fe.title(title)
-    fe.link(href=link)
-    
-    # 시간대 설정
+    fe.link(href=real_link)
+
     if date_str:
         try:
             dt = datetime.strptime(date_str, '%Y-%m-%d')
@@ -103,6 +122,4 @@ for item in list_items:
     items_found += 1
 
 print(f"탐색 완료: 총 {items_found}개의 채용 공고를 찾았습니다.")
-
-# 4. XML 파일 저장
 fg.rss_file('rss.xml')
